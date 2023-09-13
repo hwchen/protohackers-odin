@@ -3,7 +3,11 @@ package smoke_test
 import "core:fmt"
 import "core:log"
 import "core:net"
+import "core:thread"
 import "core:os"
+import "core:runtime"
+
+THREAD_COUNT :: 128
 
 main :: proc() {
     context.logger = log.create_console_logger(.Info)
@@ -26,23 +30,49 @@ main :: proc() {
         os.exit(1)
     }
 
-    log.infof("Server started, listening on %v", endpoint)
+    pool: thread.Pool
+    thread.pool_init(&pool, context.allocator, THREAD_COUNT)
+    defer thread.pool_destroy(&pool)
+    thread.pool_start(&pool)
+
+    log.infof("Server started, listening on %v on %d threads", endpoint, THREAD_COUNT)
 
     for {
         conn, source, cerr := net.accept_tcp(listener)
         if cerr != nil do log.error(cerr)
-        log.infof("Connection accepted from %v", source)
 
-        buf: [4096]byte
-        for {
-            n_bytes, rerr := net.recv_tcp(conn, buf[:])
-            if rerr != nil do log.error(rerr)
+        state := new(ConnState)
+        state.conn = conn
+        state.source = source
+        thread.pool_add_task(&pool, context.allocator, proc(t: thread.Task) {
+                context = runtime.default_context()
+                context.logger = log.create_console_logger(.Info)
+                defer log.destroy_console_logger(context.logger)
 
-            if n_bytes == 0 do break
+                state := cast(^ConnState)t.data
+                handle_conn(state.conn, state.source)
+            }, rawptr(state))
 
-            _, werr := net.send_tcp(conn, buf[:n_bytes])
-            if werr != nil do log.error(werr)
-        }
-        log.infof("Connection terminated from %v", source)
     }
+}
+
+ConnState :: struct {
+    conn:   net.TCP_Socket,
+    source: net.Endpoint,
+}
+
+handle_conn :: proc(conn: net.TCP_Socket, source: net.Endpoint) {
+    log.infof("Connection accepted from %v", source)
+
+    buf: [4096]byte
+    for {
+        n_bytes, rerr := net.recv_tcp(conn, buf[:])
+        if rerr != nil do log.error(rerr)
+
+        if n_bytes == 0 do break
+
+        _, werr := net.send_tcp(conn, buf[:n_bytes])
+        if werr != nil do log.error(werr)
+    }
+    log.infof("Connection terminated from %v", source)
 }
