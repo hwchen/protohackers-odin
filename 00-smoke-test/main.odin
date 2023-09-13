@@ -52,7 +52,9 @@ main :: proc() {
                 state := cast(^ConnState)t.data
                 handle_conn(state.conn, state.source)
             }, rawptr(state))
-
+        // not needed, but cleans up the dynamic array tracking done tasks
+        // will work better w/out tracking: https://github.com/odin-lang/Odin/pull/2668
+        thread.pool_pop_done(&pool)
     }
 }
 
