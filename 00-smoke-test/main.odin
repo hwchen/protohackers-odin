@@ -63,6 +63,10 @@ ConnState :: struct {
 
 handle_conn :: proc(conn: net.TCP_Socket, source: net.Endpoint) {
     log.infof("Connection accepted from %v", source)
+    defer {
+        net.close(conn)
+        log.infof("Connection terminated from %v", source)
+    }
 
     buf: [4096]byte
     for {
@@ -74,5 +78,4 @@ handle_conn :: proc(conn: net.TCP_Socket, source: net.Endpoint) {
         _, werr := net.send_tcp(conn, buf[:n_bytes])
         if werr != nil do log.error(werr)
     }
-    log.infof("Connection terminated from %v", source)
 }
