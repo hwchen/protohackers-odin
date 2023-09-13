@@ -61,6 +61,8 @@
         pkgs.ols
 
         pkgs.openssl
+        # used to set ELF interpreter, for nix -> other system compatibility https://github.com/NixOS/patchelf
+        pkgs.patchelf
         ];
 
         # for ols
