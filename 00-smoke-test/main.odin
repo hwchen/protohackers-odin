@@ -44,14 +44,21 @@ main :: proc() {
         state := new(ConnState)
         state.conn = conn
         state.source = source
-        thread.pool_add_task(&pool, context.allocator, proc(t: thread.Task) {
+        thread.pool_add_task(
+            &pool,
+            context.allocator,
+            proc(t: thread.Task) {
+                // Looks like logging is not thread-safe, but this is good enough for now.
+                // https://github.com/odin-lang/Odin/blob/35857d3103b65020ce486571506aa69f53ad9a1a/core/log/file_console_logger.odin#L97-L98
                 context = runtime.default_context()
                 context.logger = log.create_console_logger(.Info)
                 defer log.destroy_console_logger(context.logger)
 
                 state := cast(^ConnState)t.data
                 handle_conn(state.conn, state.source)
-            }, rawptr(state))
+            },
+            rawptr(state),
+        )
         // not needed, but cleans up the dynamic array tracking done tasks
         // will work better w/out tracking: https://github.com/odin-lang/Odin/pull/2668
         thread.pool_pop_done(&pool)
