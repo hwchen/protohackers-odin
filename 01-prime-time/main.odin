@@ -1,12 +1,17 @@
 package prime_time
 
+import "core:bytes"
 import "core:fmt"
 import "core:encoding/json"
 import "core:log"
+import "core:math/big"
 import "core:net"
 import "core:thread"
 import "core:os"
 import "core:runtime"
+import "core:slice"
+import "core:strconv"
+import "core:testing"
 
 THREAD_COUNT :: 128
 
@@ -36,7 +41,11 @@ main :: proc() {
     defer thread.pool_destroy(&pool)
     thread.pool_start(&pool)
 
-    log.infof("Server started, listening on %v on %d threads", endpoint, THREAD_COUNT)
+    log.infof(
+        "Server started, listening on %s on %d threads",
+        net.endpoint_to_string(endpoint),
+        THREAD_COUNT,
+    )
 
     for {
         conn, source, cerr := net.accept_tcp(listener)
@@ -72,60 +81,131 @@ ConnState :: struct {
 }
 
 handle_conn :: proc(conn: net.TCP_Socket, source: net.Endpoint) {
-    log.infof("Connection accepted from %v", source)
+    src := net.endpoint_to_string(source)
+    log.infof("Connection accepted from %s", src)
     defer {
         net.close(conn)
-        log.infof("Connection terminated from %v", source)
+        log.infof("Connection terminated from %s", src)
+        free_all(context.temp_allocator)
     }
 
-    buf: [4096]u8
-    n_bytes, rerr := net.recv_tcp(conn, buf[:])
-    if rerr != nil do log.error(rerr)
+    // make buffer big enough to handle entire request at once, don't worry about streaming lines
+    buf: [4096 * 10]u8
+    resp_len := 0
+    for {
+        n_bytes, rerr := net.recv_tcp(conn, buf[resp_len:])
+        if rerr != nil do log.error(rerr)
+        if n_bytes == 0 do break
+        resp_len += n_bytes
+        // continue reading if it's not the end of the request
+        if buf[resp_len - 1] != '\n' do continue
 
-    j_tree, jerr := json.parse(buf[:n_bytes], parse_integers = true)
-    if jerr != nil {
-        log.error(jerr)
-        send_malformed(conn, source)
-        return
-    }
-    defer json.destroy_value(j_tree)
-
-    // Note: this is actually pretty tidy; because of nil values being returned,
-    // you can just continue trying to extract values, but only check all the successes
-    // in one bunch at the end. This means all "err" handling can happen in one block.
-    //
-    // Perhaps dirtier than using pattern matching, but feels very practical. I should check if
-    // it's somehow cursed.
-    //
-    // Pattern matching (or rust's if let syntax) is cleaner theoretically, but you need to nest, which
-    // makes it hard to read. Would rust's chained if-let work similarly here?
-    obj, ook := j_tree.(json.Object)
-    method, mok := obj["method"].(string)
-    num, nok := obj["number"].(i64)
-    if ook && mok && nok && method == "isPrime" {
-        send_is_prime(conn, source, is_prime(num))
-    } else {
-        send_malformed(conn, source)
+        lines := buf[:resp_len]
+        for line in bytes.split_iterator(&lines, {'\n'}) {
+            log.infof("Received request (%d) %s", n_bytes, line)
+            num, nerr := extract_num(line)
+            switch nerr {
+            case .Ok, .Float:
+                is_prime := is_prime(num)
+                log.infof("Sending resp is_prime=%v to %s", is_prime, src)
+                out := fmt.tprint(`{"method":"isPrime","prime":`, is_prime, "}\n")
+                _, werr := net.send_tcp(conn, transmute([]u8)out)
+                if werr != nil do log.error(werr)
+            case .Other:
+                log.infof("Sending malformed to %s; %s", src, line)
+                _, werr := net.send_tcp(conn, {'{', '}', '\n'})
+                if werr != nil do log.error(werr)
+                return
+            }
+        }
+        resp_len = 0
     }
 }
 
-send_malformed :: proc(conn: net.TCP_Socket, source: net.Endpoint) {
-    log.infof("Sending malformed to %v", source)
-    _, werr := net.send_tcp(conn, {'{', '}'})
-    if werr != nil do log.error(werr)
+ExtractError :: enum {
+    Ok,
+    Float,
+    Other,
 }
 
-send_is_prime :: proc(conn: net.TCP_Socket, source: net.Endpoint, is_prime: bool) {
-    out := fmt.tprint(`{"method":"isPrime","prime":`, is_prime, "}")
-    defer delete(out)
-    log.infof("Sending resp %s to %v", out, source)
-    _, werr := net.send_tcp(conn, transmute([]u8)out)
-    if werr != nil do log.error(werr)
-}
+// json parsing odin core is too permissive, it allows strings to be parsed as numbers
+// so do this hacky ad-hoc brittle thing;
+extract_num :: proc(resp: []u8) -> (num: i64, err: ExtractError) {
+    //default error to .Other
+    err = .Other
 
-is_prime :: proc(num: i64) -> bool {
-    for i in 2 ..= num / 2 {
-        if num % i != 0 do return false
+    method_is_prime_str := transmute([]u8)string(`"method":"isPrime"`)
+    number_prefix := transmute([]u8)string(`"number"`)
+
+    if resp[0] != '{' || resp[len(resp)-1] != '}' do return
+    resp_trimmed := bytes.trim(resp, {'{', '}'})
+    kv_strs := bytes.split(resp_trimmed, {','})
+    if len(kv_strs) < 2 do return
+
+    number_kv_str : []u8
+    has_is_prime := false
+    for kv_str in kv_strs {
+        if slice.equal(kv_str, method_is_prime_str) {
+            has_is_prime = true
+        }
+        if bytes.has_prefix(kv_str, number_prefix) {
+            number_kv_str = kv_str
+        }
     }
+
+    if !has_is_prime do return
+
+    split_num := bytes.split(number_kv_str, {':'})
+    number, nok := strconv.parse_i64(transmute(string)split_num[1])
+    if !nok {
+        _, fok := strconv.parse_f64(transmute(string)split_num[1])
+        if fok do err = .Float; return
+    }
+    num = number
+    err = .Ok
+    return
+}
+
+@(test)
+test_extract_num:: proc(t: ^testing.T) {
+    {
+        _, err := extract_num(transmute([]u8)string(`{"method":"isPrime"}`))
+        testing.expect_value(t, err, ExtractError.Other)
+    }
+    {
+        _, err := extract_num(transmute([]u8)string(`{"method":"isPrime",`))
+        testing.expect_value(t, err, ExtractError.Other)
+    }
+    {
+        _, err := extract_num(transmute([]u8)string(`{"method":"isPrime","number":"1"}`))
+        testing.expect_value(t, err, ExtractError.Other)
+    }
+    {
+        _, err := extract_num(transmute([]u8)string(`{"method":"isPrime","number":1}`))
+        testing.expect_value(t, err, ExtractError.Ok)
+    }
+    {
+        _, err := extract_num(transmute([]u8)string(`{"method":"isPrime","number":1,"nummar":"zzz"}`))
+        testing.expect_value(t, err, ExtractError.Ok)
+    }
+}
+
+is_prime :: proc(n: i64) -> bool {
+    if n <= 1 do return false
+    if n == 2 || n == 3 do return true
+    if n % 2 == 0 || n % 3 == 0 do return false
+
+    i: i64 = 5
+    for ; i * i <= n; i += 6 {
+        if n % i == 0 || n % (i + 2) == 0 do return false
+    }
+
     return true
+}
+
+@(test)
+test_is_prime :: proc(t: ^testing.T) {
+    testing.expect_value(t, is_prime(2), true)
+    testing.expect_value(t, is_prime(5), true)
+    testing.expect_value(t, is_prime(12), false)
 }
