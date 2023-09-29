@@ -63,6 +63,7 @@ main :: proc() {
             log.error("Error connecting upstream", uerr)
             return
         }
+        log.infof("client: %d, upstream: %d", client_conn, upstream_conn)
         add_proxy_one_way(&pool, client_conn, client_addr, upstream_conn, upstream_addr)
         add_proxy_one_way(&pool, upstream_conn, upstream_addr, client_conn, client_addr)
 
@@ -96,6 +97,7 @@ add_proxy_one_way :: proc(
 
             state := cast(^ConnState)t.data
             handle_conn(state^)
+            log.infof("%5d -> %5d, Task finished", state.from_addr.port, state.to_addr.port)
         },
         rawptr(state),
     )
@@ -115,8 +117,7 @@ handle_conn :: proc(state: ConnState) {
     if state.from_addr.port == 16963 do from_addr_str = "chat"
     to_addr_str := fmt.tprintf("%d", state.to_addr.port)
     if state.to_addr.port == 16963 do to_addr_str = "chat"
-    log.infof("from %5s Connected", from_addr_str)
-    log.infof("to   %5s Connected", to_addr_str)
+    log.infof("%5s (%2d) -> %5s (%2d) Connected", from_addr_str, from_conn, to_addr_str, to_conn)
 
     defer {
         net.close(from_conn)
@@ -131,19 +132,26 @@ handle_conn :: proc(state: ConnState) {
     msg_batch: for {
         // Read. Continue reading if we don't end on a message boundary \n
         n_bytes, rerr := net.recv_tcp(from_conn, buf[read_len:])
-        if rerr != nil do break
-        if n_bytes == 0 do break
+        if rerr != nil {
+            log.infof("%5s -> %5s, %v", from_addr_str, to_addr_str, rerr)
+            break
+        }
+        if n_bytes == 0 {
+            log.infof("%5s -> %5s, read 0 bytes", from_addr_str, to_addr_str)
+            net.send_tcp(to_conn, {})
+            break
+        }
         read_len += n_bytes
         if buf[read_len - 1] != '\n' do continue
-        log.infof("%5s -> %5s messages", from_addr_str, to_addr_str)
 
         // handle each message (line)
         lines := buf[:read_len]
         for line in bytes.split_iterator(&lines, {'\n'}) {
+            log.infof("%5s -> %5s, %s", from_addr_str, to_addr_str, line)
             new_msg := rewrite_coin(line) // temp alloc
             serr := send_msg(to_conn, new_msg)
             if serr != nil {
-                log.errorf("%5s -> %5s, %v", from_addr_str, to_addr_str, serr)
+                log.errorf("%5s -> %5s, Error %d", from_addr_str, to_addr_str, serr)
                 break msg_batch
             }
         }
