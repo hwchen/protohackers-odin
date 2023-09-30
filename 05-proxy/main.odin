@@ -120,8 +120,8 @@ handle_conn :: proc(state: ConnState) {
     log.infof("%5s (%2d) -> %5s (%2d) Connected", from_addr_str, from_conn, to_addr_str, to_conn)
 
     defer {
-        net.close(from_conn)
-        net.close(to_conn)
+        net.shutdown(from_conn, .Both)
+        net.shutdown(to_conn, .Both)
         log.infof("from %5s Terminated", from_addr_str)
         log.infof("to   %5s Terminated", to_addr_str)
     }
