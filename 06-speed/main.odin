@@ -10,7 +10,6 @@ import "core:thread"
 import "core:os"
 import "core:runtime"
 import "core:sync"
-import "core:testing"
 
 THREAD_COUNT :: 128
 
@@ -109,7 +108,8 @@ handle_conn :: proc(state: ConnState) {
         log.infof("%5s Terminated", client_addr_str)
     }
 
-    buf: [4096]u8 // enough to handle one tcp receive; will handle unfinished messages by manually advancing
+    // enough to handle one tcp receive; will handle unfinished messages by manually advancing
+    buf: [4096]u8
     prefix_end_idx := 0
     for {
         // Read.
@@ -122,40 +122,8 @@ handle_conn :: proc(state: ConnState) {
 
         // handle each message
         msg_idx := 0
-        for {
-            msg_type := message_type(buf[msg_idx])
-
-            // parse in-place and directly act
-            // harder to unit test, but more concise :)
-            perr: ParseError
-            msg_len := 0
-            switch msg_type {
-            case .NoMessage:
-                perr = .Truncated
-            case .Plate:
-                str_len := buf[msg_idx + 1]
-                str := buf[msg_idx + 2:][:str_len]
-                timestamp := bytes_to_u32be(buf[msg_idx + 3 + int(str_len):][:4])
-                log.infof("%5s Plate %s %d", client_addr_str, str, timestamp)
-                msg_len = 1 + int(str_len) + 4
-            case .WantHeartbeat:
-                interval := bytes_to_u32be(buf[msg_idx + 1:][:4])
-                log.infof("%5s WantHeartbeat %d", client_addr_str, interval)
-                state.heartbeat^ = cast(u32)interval
-                msg_len = 4
-            case .IAmCamera:
-                road := bytes_to_u16be(buf[msg_idx + 1:][:4])
-                mile := bytes_to_u16be(buf[msg_idx + 5:][:4])
-                limit := bytes_to_u16be(buf[msg_idx + 9:][:4])
-                log.infof("%5s IAmCamera %d %d %d", client_addr_str, road, mile, limit)
-                msg_len = 12
-            case .IAmDispatcher:
-                numroads := buf[msg_idx + 1]
-                roads := transmute([]u16be)buf[msg_idx + 2:][:numroads * 2]
-                log.infof("%5s IAmDispatcher %d %v", client_addr_str, numroads, roads)
-                msg_len = 1 + (int(numroads) * 2)
-            }
-
+        for msg_idx < msg_batch_end_idx {
+            msg, msg_len, perr := parse_message(buf[msg_idx:])
             // handle any errors from the parse-in-place phase
             switch perr {
             case .None:
@@ -167,9 +135,25 @@ handle_conn :: proc(state: ConnState) {
                 log.errorf("parse msg malformed: %v", buf[msg_idx:])
                 break
             }
-
+            // action depending on the message
+            switch m in msg {
+            case NoMessage:
+                log.infof("%5s NoMessage")
+            case Plate:
+                log.infof("%5s Plate %d %v", client_addr_str, m.plate, m.timestamp)
+            case WantHeartbeat:
+                log.infof("%5s WantHeartbeat %d", client_addr_str, m.interval)
+                state.heartbeat^ = cast(u32)m.interval
+            case IAmCamera:
+                log.infof("%5s IAmCamera %d %d %d", client_addr_str, m.road, m.mile, m.limit)
+            case IAmDispatcher:
+                log.infof("%5s IAmDispatcher %d %v", client_addr_str, m.numroads, m.roads)
+            }
             msg_idx += msg_len - 1
         }
+        // If there's no truncation, can handle the next read normally.
+        // But need to reset in case previous iteration was a truncation read.
+        prefix_end_idx = 0
     }
 }
 
@@ -193,43 +177,4 @@ handle_heartbeat :: proc(state: ConnState) {
             time.accurate_sleep(interval)
         }
     }
-}
-
-message_type :: proc(b: u8) -> ClientMsgType {
-    switch b {
-    case 0x20:
-        return .Plate
-    case 0x40:
-        return .WantHeartbeat
-    case 0x80:
-        return .IAmCamera
-    case 0x81:
-        return .IAmDispatcher
-    case:
-        return .NoMessage
-    }
-}
-
-ClientMsgType :: enum {
-    NoMessage,
-    Plate,
-    WantHeartbeat,
-    IAmCamera,
-    IAmDispatcher,
-}
-
-ParseError :: enum {
-    None,
-    Truncated,
-    Malformed,
-}
-
-bytes_to_u16be :: proc(slice: []u8) -> u16be {
-    assert(len(slice) == 2)
-    return (transmute(^u16be)raw_data(slice))^
-}
-
-bytes_to_u32be :: proc(slice: []u8) -> u32be {
-    assert(len(slice) == 4)
-    return (transmute(^u32be)raw_data(slice))^
 }
