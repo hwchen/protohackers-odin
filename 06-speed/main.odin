@@ -5,6 +5,7 @@ import "core:fmt"
 import "core:log"
 import "core:net"
 import "core:strings"
+import "core:time"
 import "core:thread"
 import "core:os"
 import "core:runtime"
@@ -58,10 +59,13 @@ main :: proc() {
     for {
         client_conn, client_addr, cerr := net.accept_tcp(listener)
         if cerr != nil do log.error(cerr)
+        heartbeat := new(u32)
 
         state: ConnState
         state.client_conn = client_conn
         state.client_addr = client_addr
+        state.heartbeat = heartbeat
+        // Add main handler
         thread.pool_add_task(
             &pool,
             context.allocator,
@@ -77,6 +81,10 @@ main :: proc() {
             },
             rawptr(&state),
         )
+        thread.pool_add_task(&pool, context.allocator, proc(t: thread.Task) {
+                state := cast(^ConnState)t.data
+                handle_heartbeat(state^)
+            }, rawptr(&state))
 
         // not needed, but cleans up the dynamic array tracking done tasks
         // will work better w/out tracking: https://github.com/odin-lang/Odin/pull/2668
@@ -87,6 +95,7 @@ main :: proc() {
 ConnState :: struct {
     client_conn: net.TCP_Socket,
     client_addr: net.Endpoint,
+    heartbeat:   ^u32,
 }
 
 handle_conn :: proc(state: ConnState) {
@@ -97,7 +106,7 @@ handle_conn :: proc(state: ConnState) {
     defer {
         net.shutdown(client_conn, .Both)
         net.close(client_conn)
-        log.infof("to   %5s Terminated", client_addr_str)
+        log.infof("%5s Terminated", client_addr_str)
     }
 
     buf: [4096]u8 // enough to handle one tcp receive; will handle unfinished messages by manually advancing
@@ -132,6 +141,7 @@ handle_conn :: proc(state: ConnState) {
             case .WantHeartbeat:
                 interval := bytes_to_u32be(buf[msg_idx + 1:][:4])
                 log.infof("%5s WantHeartbeat %d", client_addr_str, interval)
+                state.heartbeat^ = cast(u32)interval
                 msg_len = 4
             case .IAmCamera:
                 road := bytes_to_u16be(buf[msg_idx + 1:][:4])
@@ -159,6 +169,28 @@ handle_conn :: proc(state: ConnState) {
             }
 
             msg_idx += msg_len - 1
+        }
+    }
+}
+
+handle_heartbeat :: proc(state: ConnState) {
+    client_conn := state.client_conn
+    client_addr_str := fmt.tprintf("%d", state.client_addr.port)
+    log.infof("%5s Heartbeat Connected", client_addr_str)
+
+    defer {
+        net.shutdown(client_conn, .Both)
+        net.close(client_conn)
+        log.infof("%5s Heartbeat Terminated", client_addr_str)
+    }
+
+    for {
+        interval := cast(time.Duration)state.heartbeat^ * time.Millisecond * 100
+        if state.heartbeat^ > 0 {
+            log.infof("%5s Heartbeat send, interval %v", interval)
+            n_bytes, serr := net.send_tcp(client_conn, {0x41})
+            if serr != nil || n_bytes == 0 do break
+            time.accurate_sleep(interval)
         }
     }
 }
