@@ -1,5 +1,6 @@
 package prime_time
 
+import "base:runtime"
 import "core:bytes"
 import "core:encoding/json"
 import "core:fmt"
@@ -7,7 +8,6 @@ import "core:log"
 import "core:math/big"
 import "core:net"
 import "core:os"
-import "core:runtime"
 import "core:slice"
 import "core:strconv"
 import "core:testing"

@@ -1,11 +1,11 @@
 package chat
 
+import "base:runtime"
 import "core:bytes"
 import "core:fmt"
 import "core:log"
 import "core:net"
 import "core:os"
-import "core:runtime"
 import "core:strings"
 import "core:sync"
 import "core:thread"
